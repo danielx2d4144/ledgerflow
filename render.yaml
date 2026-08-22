@@ -1,0 +1,54 @@
+# Render blueprint: one image, two processes, migrations before traffic.
+services:
+  - type: web
+    name: ledgerflow-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health/ready
+    # Runs before the new image takes traffic; migrations must be backward
+    # compatible with the previous release (expand/contract).
+    preDeployCommand: node dist/infra/migrate.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase: { name: ledgerflow-postgres, property: connectionString }
+      - key: REDIS_URL
+        fromService: { type: redis, name: ledgerflow-redis, property: connectionString }
+      - key: API_KEY_PEPPER
+        generateValue: true
+      - key: WEBHOOK_SECRET_KEY
+        sync: false # 32 bytes base64: openssl rand -base64 32
+      # Render terminates TLS one hop in front of the app; anything more
+      # permissive lets clients forge the rate-limit key (review H4).
+      - key: TRUST_PROXY
+        value: '1'
+  - type: worker
+    name: ledgerflow-webhook-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: node dist/worker.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase: { name: ledgerflow-postgres, property: connectionString }
+      - key: REDIS_URL
+        fromService: { type: redis, name: ledgerflow-redis, property: connectionString }
+      - key: API_KEY_PEPPER
+        fromService: { type: web, name: ledgerflow-api, envVarKey: API_KEY_PEPPER }
+      # Must be the *same* value as the API's key: the API encrypts endpoint
+      # secrets with it and the worker decrypts them (review M6). Two
+      # independent `sync: false` entries silently stall every delivery.
+      - key: WEBHOOK_SECRET_KEY
+        fromService: { type: web, name: ledgerflow-api, envVarKey: WEBHOOK_SECRET_KEY }
+  - type: redis
+    name: ledgerflow-redis
+    ipAllowList: []
+    plan: starter
+
+databases:
+  - name: ledgerflow-postgres
+    plan: basic-256mb

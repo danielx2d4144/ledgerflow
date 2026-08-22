@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  static:
+    name: lint · types · format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run format:check
+
+  test:
+    name: tests (real Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ledgerflow
+          POSTGRES_PASSWORD: ledgerflow
+          POSTGRES_DB: ledgerflow_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ledgerflow -d ledgerflow_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      # With TEST_DATABASE_URL set, the suite migrates and runs against the real
+      # server instead of the in-process PGlite used for local runs.
+      TEST_DATABASE_URL: postgres://ledgerflow:ledgerflow@127.0.0.1:5432/ledgerflow_test
+      TEST_REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Test with coverage thresholds
+        run: npm run test:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
+
+  migrations:
+    name: migration verification
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ledgerflow
+          POSTGRES_PASSWORD: ledgerflow
+          POSTGRES_DB: ledgerflow_migrations
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U ledgerflow -d ledgerflow_migrations"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Apply, re-apply and inspect migrations
+        env:
+          VERIFY_DATABASE_URL: postgres://ledgerflow:ledgerflow@127.0.0.1:5432/ledgerflow_migrations
+        run: npm run db:verify
+
+  contract:
+    name: openapi is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Regenerate the spec and fail on drift
+        run: |
+          npm run openapi
+          git diff --exit-code -- openapi.json
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # Runtime dependencies must be clean. Dev-only advisories are reported but
+      # do not block, because they cannot reach a deployed artifact.
+      - run: npm run audit:prod
+      - run: npm audit --audit-level=high || true
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ledgerflow:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke the image
+        run: docker run --rm --entrypoint node ledgerflow:ci --version

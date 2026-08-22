@@ -1,0 +1,82 @@
+name: ledgerflow
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ledgerflow
+      POSTGRES_PASSWORD: ledgerflow
+      POSTGRES_DB: ledgerflow
+    ports: ['5432:5432']
+    volumes: ['postgres-data:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ledgerflow -d ledgerflow']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    ports: ['6379:6379']
+    volumes: ['redis-data:/data']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      target: runtime
+    profiles: ['app']
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ledgerflow:ledgerflow@postgres:5432/ledgerflow
+      REDIS_URL: redis://redis:6379
+      PORT: '3000'
+      # Required, never defaulted: these services run with NODE_ENV=production,
+      # and a compose-provided default is a publicly known secret (review L8).
+      # `cp .env.example .env` and fill both in before `--profile app`.
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?set API_KEY_PEPPER (min 32 chars)}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?set WEBHOOK_SECRET_KEY (openssl rand -base64 32)}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+    ports: ['3000:3000']
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    profiles: ['app']
+    command: ['node', 'dist/worker.js']
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://ledgerflow:ledgerflow@postgres:5432/ledgerflow
+      REDIS_URL: redis://redis:6379
+      # Same values as the api service: the pepper authenticates keys and the
+      # webhook key must match the one the API encrypted secrets with (M6).
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?set API_KEY_PEPPER (min 32 chars)}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?set WEBHOOK_SECRET_KEY (openssl rand -base64 32)}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+volumes:
+  postgres-data:
+  redis-data:
