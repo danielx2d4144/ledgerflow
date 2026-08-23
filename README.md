@@ -100,6 +100,15 @@ npm run audit:prod    # runtime dependency audit
 npm run check         # all of the above, in order
 ```
 
+## Troubleshooting
+
+If the API does not start locally:
+
+1. Confirm PostgreSQL and Redis are running.
+2. Confirm `.env` exists and matches `.env.example`.
+3. Run `npm run db:migrate`.
+4. Run `npm run check` to verify the installation.
+
 Tests boot an in-process Postgres (PGlite over the real wire protocol) so a
 plain `npm test` needs no Docker; setting `TEST_DATABASE_URL` points the same
 suite at a real server, which is what CI does. Redis-specific tests skip
