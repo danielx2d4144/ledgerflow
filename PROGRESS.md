@@ -28,11 +28,14 @@ Completed locally:
 
 Still open:
 
-- Per-tenant outbox fairness and its ADR/test.
 - DNS-rebinding protection with a pinned-IP connector and regression test.
 - Auth `last_used_at` debounce.
 - Per-organization transaction amount policy cap.
 - Missing Drizzle snapshots for migrations 0001 and 0004.
+
+Completed on 2026-08-23:
+
+- Per-tenant outbox fairness implemented and documented in ADR-0009.
 
 Verified locally on 2026-08-21:
 

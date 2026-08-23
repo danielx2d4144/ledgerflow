@@ -35,13 +35,57 @@ export async function dispatchOutboxBatch(options: DispatcherOptions): Promise<D
   const stats: DispatchStats = { claimedEvents: 0, createdDeliveries: 0, requeuedDeliveries: 0 };
 
   const deliveryIds = await options.db.transaction(async (tx) => {
-    const claimed = await tx
-      .select()
+    // Give every active organization one slot before filling the remainder by
+    // age. This keeps one tenant's backlog from starving other tenants.
+    const fairOrganizations = await tx
+      .select({ organizationId: outboxEvents.organizationId })
       .from(outboxEvents)
       .where(and(eq(outboxEvents.status, 'pending'), lte(outboxEvents.availableAt, now())))
-      .orderBy(outboxEvents.createdAt)
-      .limit(options.batchSize)
-      .for('update', { skipLocked: true });
+      .groupBy(outboxEvents.organizationId)
+      .orderBy(sql`min(${outboxEvents.createdAt})`)
+      .limit(options.batchSize);
+
+    const fairClaims = [];
+    for (const organization of fairOrganizations) {
+      const [event] = await tx
+        .select()
+        .from(outboxEvents)
+        .where(
+          and(
+            eq(outboxEvents.organizationId, organization.organizationId),
+            eq(outboxEvents.status, 'pending'),
+            lte(outboxEvents.availableAt, now()),
+          ),
+        )
+        .orderBy(outboxEvents.createdAt, outboxEvents.id)
+        .limit(1)
+        .for('update', { skipLocked: true });
+      if (event) fairClaims.push(event);
+    }
+
+    const remaining = options.batchSize - fairClaims.length;
+    const fill =
+      remaining > 0
+        ? await tx
+            .select()
+            .from(outboxEvents)
+            .where(
+              and(
+                eq(outboxEvents.status, 'pending'),
+                lte(outboxEvents.availableAt, now()),
+                fairClaims.length > 0
+                  ? sql`not ${inArray(
+                      outboxEvents.id,
+                      fairClaims.map((event) => event.id),
+                    )}`
+                  : undefined,
+              ),
+            )
+            .orderBy(outboxEvents.createdAt, outboxEvents.id)
+            .limit(remaining)
+            .for('update', { skipLocked: true })
+        : [];
+    const claimed = [...fairClaims, ...fill];
 
     if (claimed.length === 0) return [];
     stats.claimedEvents = claimed.length;

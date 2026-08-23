@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { webhookDeliveries, webhookEndpoints } from '../src/infra/schema.js';
+import { outboxEvents, webhookDeliveries, webhookEndpoints } from '../src/infra/schema.js';
 import { dispatchOutboxBatch, requeueDueDeliveries } from '../src/modules/outbox/dispatcher.js';
 import { executeDelivery, type DeliveryConfig } from '../src/modules/webhooks/delivery.js';
 import { verifySignature } from '../src/modules/webhooks/signature.js';
@@ -138,6 +138,52 @@ async function deliveryRow(id: string) {
 }
 
 describe('outbox dispatch and HMAC delivery', () => {
+  it('gives each organization a dispatch slot before serving backlog depth', async () => {
+    const noisy = await context.createOrganization();
+    const quiet = await context.createOrganization();
+    const fairnessEpoch = new Date('2020-01-01T00:00:00.000Z');
+    const noisyEvents = await context.database.db
+      .insert(outboxEvents)
+      .values(
+        Array.from({ length: 4 }, (_, index) => ({
+          organizationId: noisy.id,
+          eventType: `noisy.${index}`,
+          aggregateType: 'test',
+          aggregateId: `noisy-${index}`,
+          payload: {},
+          createdAt: fairnessEpoch,
+        })),
+      )
+      .returning({ id: outboxEvents.id });
+    const [quietEvent] = await context.database.db
+      .insert(outboxEvents)
+      .values({
+        organizationId: quiet.id,
+        eventType: 'quiet.0',
+        aggregateType: 'test',
+        aggregateId: 'quiet-0',
+        payload: {},
+        createdAt: fairnessEpoch,
+      })
+      .returning({ id: outboxEvents.id });
+
+    const stats = await dispatchOutboxBatch({
+      db: context.database.db,
+      queue: context.queue,
+      batchSize: 2,
+      maxAttempts: 2,
+    });
+    expect(stats.claimedEvents).toBe(2);
+
+    const claimed = await context.database.db
+      .select({ id: outboxEvents.id, organizationId: outboxEvents.organizationId })
+      .from(outboxEvents)
+      .where(eq(outboxEvents.status, 'dispatched'));
+    const claimedIds = new Set(claimed.map((event) => event.id));
+    expect(claimedIds.has(mustExist(quietEvent).id)).toBe(true);
+    expect(noisyEvents.filter((event) => claimedIds.has(event.id))).toHaveLength(1);
+  });
+
   it('delivers a signed, verifiable payload to a live receiver', async () => {
     const { secret, endpoint } = await registerEndpoint(['transaction.created']);
     const transactionId = await postTransaction();
