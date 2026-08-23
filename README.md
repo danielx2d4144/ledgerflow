@@ -109,6 +109,18 @@ If the API does not start locally:
 3. Run `npm run db:migrate`.
 4. Run `npm run check` to verify the installation.
 
+## Contributor validation checklist
+
+Before opening a pull request, verify the branch is ready:
+
+1. Run `npm run lint`.
+2. Run `npm run typecheck`.
+3. Run `npm run format:check`.
+4. Run `npm test` for the targeted behavior or `npm run test:coverage` for the full suite.
+5. Run `npm run db:verify` when schema or migration files changed.
+6. Run `npm run audit:prod` when dependency changes are part of the PR.
+7. Confirm the diff is small, focused, and documented.
+
 Tests boot an in-process Postgres (PGlite over the real wire protocol) so a
 plain `npm test` needs no Docker; setting `TEST_DATABASE_URL` points the same
 suite at a real server, which is what CI does. Redis-specific tests skip
